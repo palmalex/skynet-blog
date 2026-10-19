@@ -9,11 +9,14 @@ GitHub Actions on GitHub-hosted runners. Decisions and evidence live in the infr
 This repository is PUBLIC. Never commit secrets, internal IPs, hostnames of the lab beyond the public
 site, tailnet details, or a draft that must stay private (history is readable by everyone).
 
-## Layout (target, scaffold is #754)
-- `content/` posts and pages (Markdown + front matter, `draft: true` stays out of the build)
-- `themes/tabi` pinned at commit 606f4b28aef052e8a716fe947c0166913731e339
-- `build.sh` downloads Zola (sha256 checked), builds, and with `check` validates feed, sitemap and drafts
+## Layout
+- `content/` home, `about.md` and posts in `content/blog/<slug>/index.md` (Markdown + TOML front matter, `draft = true` stays out of the build)
+- `static/img/favicon.png`, `config.toml` (site name "Idle Cycle", base URL of production)
+- `themes/tabi` is NOT committed: `build.sh` clones it at commit 606f4b28aef052e8a716fe947c0166913731e339 into a git-ignored folder, like the pinned Zola in `.cache/`
+- `build.sh [build [production|preview]|check|serve]`; `check` also proves that two builds of the same commit are identical and that the preview and production builds differ only in the hostname
+- `check_output.py` reads the posts and drafts from the front matter: a new post needs no change there
 - `.github/workflows/` `checks.yml` (required status check `checks`), `pool-probe.yml` (manual boundary test)
+- The theme is used whole (about 250 files, 8 MB): pruning it is tracked as #826 in the infrastructure repository
 
 ## Rules
 - Workflows: `pull_request` only, never `pull_request_target`; `permissions: contents: read` at the top;

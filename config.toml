@@ -1,0 +1,30 @@
+# Idle Cycle: Zola with the tabi theme (decisions and measurements: docs/blog.md in palmalex/skynet-control-plane).
+# base_url is the production hostname; build.sh overrides it for the preview and for `serve`.
+base_url = "https://blog.palmalex.cc"
+title = "Idle Cycle"
+description = "What I build and think about when the CPU of my day job is idle: side projects, systems, hardware and ideas worth writing down."
+author = "palmalex"
+theme = "tabi"
+default_language = "en"
+generate_feeds = true
+compile_sass = true
+minify_html = true
+build_search_index = true
+taxonomies = [{ name = "tags", feed = true }]
+
+[search]
+index_format = "elasticlunr_json"
+
+[markdown.highlighting]
+theme = "catppuccin-frappe"
+style = "class"
+
+[extra]
+skin = "evangelion"
+theme_switcher = true
+favicon = "img/favicon.png"
+menu = [
+    { name = "blog", url = "blog", trailing_slash = true },
+    { name = "tags", url = "tags", trailing_slash = true },
+    { name = "about", url = "about", trailing_slash = true },
+]
