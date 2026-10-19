@@ -1,0 +1,14 @@
+name: pool-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, skynet, infra]
+    timeout-minutes: 1
+    steps:
+      - run: echo "this must never run"

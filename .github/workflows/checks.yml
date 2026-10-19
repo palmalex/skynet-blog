@@ -1,0 +1,37 @@
+name: checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runs on a GitHub-hosted runner
+        run: |
+          echo "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT"
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+
+      - name: Secrets of the infrastructure repository are not readable
+        env:
+          # Names that exist in skynet-control-plane or on the pool; here they must resolve to empty.
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          GH_RUNNER_PAT: ${{ secrets.github_runner_pat }}
+        run: |
+          for v in SOPS_AGE_KEY OCI_PRIVATE_KEY GH_RUNNER_PAT; do
+            if [ -n "${!v}" ]; then echo "::error::$v is set"; exit 1; fi
+            echo "$v: empty (ok)"
+          done
+
+      - name: No credentials of the lab on the machine
+        run: |
+          for p in "$HOME/.oci" "$HOME/.config/sops" "$HOME/.ssh/id_ed25519"; do
+            if [ -e "$p" ]; then echo "::error::$p exists"; exit 1; fi
+            echo "$p: absent (ok)"
+          done
