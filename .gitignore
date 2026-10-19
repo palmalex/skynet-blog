@@ -1,3 +1,8 @@
 .claude/settings.local.json
+
+# Downloaded by build.sh
+.cache/
+themes/
+
+# Build output
 public/
-.build/
