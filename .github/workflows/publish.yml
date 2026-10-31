@@ -1,0 +1,165 @@
+name: publish
+
+# Publication of the site (#756). Every push to the default branch builds, shows the result in the private preview
+# (main/ of the preview bucket) and then WAITS for the owner: the job `production` runs in the environment
+# `production` (required reviewer, deployments only from `main`), so nothing is public before the approval.
+#
+# Rollback: run this workflow by hand (workflow_dispatch, from `main`) with the commit to restore; it must be a
+# commit of `main`. The approval is required again.
+#
+# The build job runs the code of the repository and has no secret; the two publishing jobs only handle built files.
+# This workflow never runs on pull_request: the preview of a pull request is preview.yml.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit of main to (re)publish, 40 hexadecimal characters (rollback)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One publication at a time; a queued one waits instead of cancelling a running upload.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  PREVIEW_HOST: https://blog-preview.palmalex.cc
+  PRODUCTION_HOST: https://blog.palmalex.cc
+  PREVIEW_BUCKET: skynet-blog-preview
+  PRODUCTION_BUCKET: skynet-blog-production
+  # R2 does not support the default integrity checksums of recent AWS CLI versions.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+  AWS_DEFAULT_REGION: auto
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Only a commit of main can be published
+        id: sha
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ -n "$INPUT_REF" ]; then
+            [[ "$INPUT_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref must be a full 40-character commit id"; exit 1; }
+            git merge-base --is-ancestor "$sha" origin/main \
+              || { echo "::error::$sha is not a commit of main"; exit 1; }
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Publishing $sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checks and the two builds of this commit
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          ./build.sh check
+          mkdir -p out
+          ./build.sh build production
+          rm -rf out/production && mv public out/production
+          # The preview of main is skipped on a rollback: an old commit may predate the path prefix of build.sh.
+          if [ "$EVENT" = push ]; then
+            ./build.sh build preview main
+            rm -rf out/preview && mv public out/preview
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: site
+          path: out
+          if-no-files-found: error
+          retention-days: 1
+
+  preview-main:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: preview
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: site
+          path: out
+      - name: Upload to main/ of the preview bucket
+        run: |
+          dest="s3://$PREVIEW_BUCKET/main/"
+          aws s3 sync out/preview "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*.html' \
+            --cache-control 'no-cache'
+          aws s3 sync out/preview "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*' --include '*.html' \
+            --content-type 'text/html; charset=utf-8' --cache-control 'no-cache'
+          echo "Preview of ${{ needs.build.outputs.sha }}: $PREVIEW_HOST/main/ (owner login required)" >> "$GITHUB_STEP_SUMMARY"
+
+  production:
+    needs: [build, preview-main]
+    # preview-main is skipped on a rollback; a failed or cancelled one blocks the publication.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.preview-main.result == 'success' || needs.preview-main.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: site
+          path: out
+
+      - name: Upload, in the order that keeps the site consistent
+        run: |
+          src=out/production
+          dest="s3://$PRODUCTION_BUCKET/"
+          # No purge: HTML and feeds live 5 minutes at the edge; the other files 1 hour. The CSS and the search
+          # script carry a content hash in their URL, so a changed file has a new address.
+          # 1. everything that is neither a page nor a feed, never deleting anything yet
+          aws s3 sync "$src" "$dest" --endpoint-url "$ENDPOINT" \
+            --exclude '*.html' --exclude '*.xml' --exclude '*.xsl' --exclude '*.txt' \
+            --cache-control 'public, max-age=3600'
+          # 2. the pages, last of the content
+          aws s3 sync "$src" "$dest" --endpoint-url "$ENDPOINT" \
+            --exclude '*' --include '*.html' \
+            --content-type 'text/html; charset=utf-8' --cache-control 'public, max-age=300'
+          # 3. the feeds, the sitemap and robots.txt
+          aws s3 sync "$src" "$dest" --endpoint-url "$ENDPOINT" \
+            --exclude '*' --include '*.xml' --include '*.xsl' --include '*.txt' \
+            --cache-control 'public, max-age=300'
+          # 4. only now what the new build no longer has (files already uploaded are newer than the source: skipped)
+          aws s3 sync "$src" "$dest" --endpoint-url "$ENDPOINT" --delete
+
+      - name: The bucket holds exactly this build (a partial upload fails here)
+        run: |
+          (cd out/production && find . -type f -printf '%s %P\n' | sort) > expected.txt
+          # the listing goes to a file first: a failed listing must stop the step, not look like an empty bucket
+          aws s3 ls "s3://$PRODUCTION_BUCKET/" --endpoint-url "$ENDPOINT" --recursive > listing.txt
+          awk '{ size=$3; $1=$2=$3=""; sub(/^ +/, ""); print size " " $0 }' listing.txt | sort > actual.txt
+          if ! diff expected.txt actual.txt > diff.txt; then
+            echo "::error::the bucket does not match the build"; head -20 diff.txt; exit 1
+          fi
+          echo "bucket matches the build: $(wc -l < expected.txt) objects"
+
+      - name: The public site answers
+        run: |
+          curl -fsS --retry 5 --retry-delay 5 --retry-all-errors -o /dev/null -w 'GET / -> %{http_code}\n' "$PRODUCTION_HOST/"
+          echo "Published ${{ needs.build.outputs.sha }} to $PRODUCTION_HOST/" >> "$GITHUB_STEP_SUMMARY"
