@@ -4,6 +4,8 @@
 #
 #   ./build.sh                 build the production site into public/
 #   ./build.sh build preview   build with the preview base URL
+#   ./build.sh build preview pr-7
+#                              build for one pull request: the preview URL plus a path prefix (#755)
 #   ./build.sh check           build, validate the output, then prove the two properties the publish relies on:
 #                              two builds of the same commit are identical, and the preview and production
 #                              builds differ only in the hostname
@@ -62,7 +64,13 @@ build() {
   local url
   case "${1:-production}" in
     production) url="$HOST_PRODUCTION" ;;
-    preview) url="$HOST_PREVIEW" ;;
+    preview)
+      url="$HOST_PREVIEW"
+      if [ -n "${2:-}" ]; then
+        [[ "$2" =~ ^[a-z0-9-]+$ ]] || { echo "build.sh: invalid preview prefix '$2'" >&2; exit 2; }
+        url="$HOST_PREVIEW/$2"
+      fi
+      ;;
     *) echo "build.sh: unknown target '$1' (production or preview)" >&2; exit 2 ;;
   esac
   build_to public "${BASE_URL:-$url}"
@@ -94,13 +102,21 @@ check() {
   diff -r "$cache/out-a" "$cache/out-swapped" >/dev/null \
     || { echo "build.sh: the preview build differs from production beyond the hostname:" >&2; diff -rq "$cache/out-a" "$cache/out-swapped" >&2; exit 1; }
   echo "base URL: preview and production differ only in the hostname"
+
+  # A pull request preview lives under a path prefix of the preview host: swapping host and prefix back must
+  # also give the production output, so no link is lost or hard-coded outside the base URL.
+  build_to "$cache/out-pr" "$HOST_PREVIEW/pr-0" >/dev/null
+  grep -rlI "$HOST_PREVIEW/pr-0" "$cache/out-pr" | xargs -r sed -i "s#$HOST_PREVIEW/pr-0#$HOST_PRODUCTION#g"
+  diff -r "$cache/out-a" "$cache/out-pr" >/dev/null \
+    || { echo "build.sh: the pull request preview differs from production beyond host and prefix:" >&2; diff -rq "$cache/out-a" "$cache/out-pr" >&2; exit 1; }
+  echo "base URL: a pull request preview differs only in host and prefix"
 }
 
 fetch_zola
 fetch_tabi
 case "${1:-build}" in
-  build) build "${2:-production}" ;;
+  build) build "${2:-production}" "${3:-}" ;;
   check) check ;;
   serve) "$zola" serve --base-url http://127.0.0.1:1111 --interface 127.0.0.1 ;;
-  *) echo "usage: $0 [build [production|preview]|check|serve]" >&2; exit 2 ;;
+  *) echo "usage: $0 [build [production|preview [prefix]]|check|serve]" >&2; exit 2 ;;
 esac
