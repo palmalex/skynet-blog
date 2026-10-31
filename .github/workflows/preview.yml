@@ -1,0 +1,118 @@
+name: preview
+
+# Private preview of every pull request (#755): build without secrets, publish under pr-<N>/ of the preview
+# bucket (behind Cloudflare Access), comment the URL, remove the path when the pull request closes.
+#
+# The build job runs the code of the pull request and has no secret. The publish job holds the bucket token
+# but only handles the built files, never the code of the pull request. Pull requests from forks are skipped.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  PREVIEW_HOST: https://blog-preview.palmalex.cc
+  BUCKET: skynet-blog-preview
+  PREFIX: pr-${{ github.event.pull_request.number }}
+  # R2 does not support the default integrity checksums of recent AWS CLI versions.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+  AWS_DEFAULT_REGION: auto
+
+jobs:
+  build:
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build for this pull request
+        run: |
+          ./build.sh check
+          ./build.sh build preview "$PREFIX"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: site
+          path: public
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: preview
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: site
+          path: public
+      - name: Upload to the preview bucket
+        run: |
+          dest="s3://$BUCKET/$PREFIX/"
+          # Everything except HTML first (types guessed from the extension), then HTML with an explicit charset.
+          # --delete removes files of a previous push that no longer exist; each pass only touches its own files.
+          aws s3 sync public "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*.html' \
+            --cache-control 'no-cache'
+          aws s3 sync public "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*' --include '*.html' \
+            --content-type 'text/html; charset=utf-8' --cache-control 'no-cache'
+      - name: Comment the preview URL
+        run: |
+          body="<!-- preview-url -->
+          Private preview (owner login required): ${PREVIEW_HOST}/${PREFIX}/
+
+          Built from ${{ github.event.pull_request.head.sha }}. Removed when this pull request closes."
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq '[.[] | select(.body | startswith("<!-- preview-url -->"))][0].id // empty')
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" >/dev/null
+          fi
+
+  cleanup:
+    if: github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: preview
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Remove the preview path
+        run: |
+          aws s3 rm "s3://$BUCKET/$PREFIX/" --endpoint-url "$ENDPOINT" --recursive
+          left=$(aws s3 ls "s3://$BUCKET/$PREFIX/" --endpoint-url "$ENDPOINT" --recursive | wc -l)
+          echo "objects left under $PREFIX/: $left"
+          test "$left" -eq 0
+      - name: Update the comment
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq '[.[] | select(.body | startswith("<!-- preview-url -->"))][0].id // empty')
+          [ -z "$id" ] || gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" \
+            -f body="<!-- preview-url -->
+          Preview removed: this pull request is closed." >/dev/null
