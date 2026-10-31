@@ -104,10 +104,19 @@ jobs:
       - name: Upload to main/ of the preview bucket
         run: |
           dest="s3://$PREVIEW_BUCKET/main/"
-          aws s3 sync out/preview "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*.html' \
+          aws s3 sync out/preview "$dest" --endpoint-url "$ENDPOINT" --exclude '*.html' \
             --cache-control 'no-cache'
-          aws s3 sync out/preview "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*' --include '*.html' \
+          aws s3 sync out/preview "$dest" --endpoint-url "$ENDPOINT" --exclude '*' --include '*.html' \
             --content-type 'text/html; charset=utf-8' --cache-control 'no-cache'
+          # Stale objects (in the bucket, not in the build) are removed by key, not with `sync --delete`: its
+          # ordering compared ".woff" with ".woff2" wrongly and deleted files of the build (#756).
+          export LC_ALL=C
+          aws s3 ls "$dest" --endpoint-url "$ENDPOINT" --recursive > listing.txt
+          awk '{ $1=$2=$3=""; sub(/^ +/, ""); print }' listing.txt | sort > remote_keys.txt
+          (cd out/preview && find . -type f -printf 'main/%P\n' | sort) > local_keys.txt
+          comm -13 local_keys.txt remote_keys.txt > stale.txt
+          while IFS= read -r key; do aws s3 rm "s3://$PREVIEW_BUCKET/$key" --endpoint-url "$ENDPOINT"; done < stale.txt
+          echo "removed $(wc -l < stale.txt) stale objects"
           echo "Preview of ${{ needs.build.outputs.sha }}: $PREVIEW_HOST/main/ (owner login required)" >> "$GITHUB_STEP_SUMMARY"
 
   production:
@@ -145,8 +154,15 @@ jobs:
           aws s3 sync "$src" "$dest" --endpoint-url "$ENDPOINT" \
             --exclude '*' --include '*.xml' --include '*.xsl' --include '*.txt' \
             --cache-control 'public, max-age=300'
-          # 4. only now what the new build no longer has (files already uploaded are newer than the source: skipped)
-          aws s3 sync "$src" "$dest" --endpoint-url "$ENDPOINT" --delete
+          # 4. only now what the new build no longer has. By key, not with `sync --delete`: its ordering compared
+          #    ".woff" with ".woff2" wrongly and deleted files of the build (first run of #756).
+          export LC_ALL=C
+          aws s3 ls "$dest" --endpoint-url "$ENDPOINT" --recursive > listing.txt
+          awk '{ $1=$2=$3=""; sub(/^ +/, ""); print }' listing.txt | sort > remote_keys.txt
+          (cd "$src" && find . -type f -printf '%P\n' | sort) > local_keys.txt
+          comm -13 local_keys.txt remote_keys.txt > stale.txt
+          while IFS= read -r key; do aws s3 rm "s3://$PRODUCTION_BUCKET/$key" --endpoint-url "$ENDPOINT"; done < stale.txt
+          echo "removed $(wc -l < stale.txt) stale objects"
 
       - name: The bucket holds exactly this build (a partial upload fails here)
         run: |

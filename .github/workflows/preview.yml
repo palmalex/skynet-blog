@@ -69,11 +69,19 @@ jobs:
         run: |
           dest="s3://$BUCKET/$PREFIX/"
           # Everything except HTML first (types guessed from the extension), then HTML with an explicit charset.
-          # --delete removes files of a previous push that no longer exist; each pass only touches its own files.
-          aws s3 sync public "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*.html' \
+          aws s3 sync public "$dest" --endpoint-url "$ENDPOINT" --exclude '*.html' \
             --cache-control 'no-cache'
-          aws s3 sync public "$dest" --endpoint-url "$ENDPOINT" --delete --exclude '*' --include '*.html' \
+          aws s3 sync public "$dest" --endpoint-url "$ENDPOINT" --exclude '*' --include '*.html' \
             --content-type 'text/html; charset=utf-8' --cache-control 'no-cache'
+          # Files of a previous push that no longer exist (in the bucket, not in the build) are removed by key, not
+          # with `sync --delete`: its ordering compared ".woff" with ".woff2" wrongly and deleted files of the build.
+          export LC_ALL=C
+          aws s3 ls "$dest" --endpoint-url "$ENDPOINT" --recursive > listing.txt
+          awk '{ $1=$2=$3=""; sub(/^ +/, ""); print }' listing.txt | sort > remote_keys.txt
+          (cd public && find . -type f -printf "$PREFIX/%P\n" | sort) > local_keys.txt
+          comm -13 local_keys.txt remote_keys.txt > stale.txt
+          while IFS= read -r key; do aws s3 rm "s3://$BUCKET/$key" --endpoint-url "$ENDPOINT"; done < stale.txt
+          echo "removed $(wc -l < stale.txt) stale objects"
       - name: Comment the preview URL
         run: |
           body="<!-- preview-url -->
