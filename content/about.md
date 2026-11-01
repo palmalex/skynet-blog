@@ -9,4 +9,4 @@ Much of it happens in a home lab: a small Proxmox host, a couple of Raspberry Pi
 
 This site is static, built from a public repository and published to Cloudflare R2. How it got that way is [the first post](@/blog/zola-on-r2/index.md).
 
-Last reviewed: 2026-11-01.
+Last reviewed: 2026-11-01. See also [a page that does not exist](/blog/nope/).
