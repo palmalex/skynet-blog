@@ -9,6 +9,7 @@
 #   ./build.sh check           build, validate the output, then prove the two properties the publish relies on:
 #                              two builds of the same commit are identical, and the preview and production
 #                              builds differ only in the hostname
+#   ./build.sh links           check the external links (needs the network; advisory in CI, not part of `check`)
 #   ./build.sh serve           build and serve on http://127.0.0.1:1111
 #
 # Everything it downloads goes under .cache/ and themes/ (git-ignored). BASE_URL overrides the base URL of `build`.
@@ -54,18 +55,23 @@ fetch_tabi() {
     || { echo "build.sh: themes/tabi is not at the pinned commit $TABI_COMMIT" >&2; exit 1; }
 }
 
-# build_to <output dir> <base url>
+# build_to <output dir> <base url> [extra zola build flags]
 build_to() {
-  rm -rf "$1"
-  "$zola" build --base-url "$2" --output-dir "$1"
+  local out=$1 url=$2
+  shift 2
+  rm -rf "$out"
+  "$zola" build --base-url "$url" --output-dir "$out" "$@"
 }
 
 build() {
   local url
+  local flags=()
   case "${1:-production}" in
     production) url="$HOST_PRODUCTION" ;;
     preview)
       url="$HOST_PREVIEW"
+      # The preview shows the drafts; production never does (#758).
+      flags=(--drafts)
       if [ -n "${2:-}" ]; then
         [[ "$2" =~ ^[a-z0-9-]+$ ]] || { echo "build.sh: invalid preview prefix '$2'" >&2; exit 2; }
         url="$HOST_PREVIEW/$2"
@@ -73,7 +79,7 @@ build() {
       ;;
     *) echo "build.sh: unknown target '$1' (production or preview)" >&2; exit 2 ;;
   esac
-  build_to public "${BASE_URL:-$url}"
+  build_to public "${BASE_URL:-$url}" ${flags[@]+"${flags[@]}"}
   echo "built: $(find public -type f | wc -l) files, $(du -sb public | cut -f1) bytes"
 }
 
@@ -86,6 +92,7 @@ check() {
 
   build production
   "$cache/venv/bin/python" check_output.py public "$cache/sitemap.xsd" content
+  "$cache/venv/bin/python" -I check_links.py public "$HOST_PRODUCTION"
 
   # Two builds of the same commit must be identical, byte for byte.
   build_to "$cache/out-a" "$HOST_PRODUCTION" >/dev/null
@@ -110,6 +117,37 @@ check() {
   diff -r "$cache/out-a" "$cache/out-pr" >/dev/null \
     || { echo "build.sh: the pull request preview differs from production beyond host and prefix:" >&2; diff -rq "$cache/out-a" "$cache/out-pr" >&2; exit 1; }
   echo "base URL: a pull request preview differs only in host and prefix"
+
+  # A draft is built in the preview and leaves no trace in production. Proved with a throw-away draft added to
+  # content/ (removed by the trap, whatever happens): without --drafts the output must be identical to the real
+  # one; with --drafts the page and its entry in the blog list must exist, so the first half is not true only
+  # because the draft was never read.
+  local fx_draft=content/blog/draft-fixture fx_link=content/blog/link-fixture
+  trap 'rm -rf content/blog/draft-fixture content/blog/link-fixture' EXIT
+  rm -rf "$fx_draft" "$fx_link"
+  mkdir -p "$fx_draft"
+  printf '+++\ntitle = "Draft fixture"\ndate = 2026-11-01\ndraft = true\n+++\n\nA draft.\n' > "$fx_draft/index.md"
+  build_to "$cache/out-fx-prod" "$HOST_PRODUCTION" >/dev/null
+  diff -r "$cache/out-a" "$cache/out-fx-prod" >/dev/null \
+    || { echo "build.sh: a draft changed the production output:" >&2; diff -rq "$cache/out-a" "$cache/out-fx-prod" >&2; exit 1; }
+  build_to "$cache/out-fx-draft" "$HOST_PREVIEW" --drafts >/dev/null
+  [ -f "$cache/out-fx-draft/blog/draft-fixture/index.html" ] \
+    && grep -q "draft-fixture" "$cache/out-fx-draft/blog/index.html" \
+    || { echo "build.sh: the draft is missing from the build with --drafts" >&2; exit 1; }
+  echo "drafts: built with --drafts, absent from the production output (pages, list, feed, sitemap, search index)"
+  rm -rf "$fx_draft"
+
+  # A broken internal link must fail the link check (the real site passed it above).
+  mkdir -p "$fx_link"
+  printf '+++\ntitle = "Link fixture"\ndate = 2026-11-01\n+++\n\n[broken](/blog/does-not-exist/)\n' > "$fx_link/index.md"
+  build_to "$cache/out-fx-link" "$HOST_PRODUCTION" >/dev/null
+  rm -rf "$fx_link"
+  if "$cache/venv/bin/python" -I check_links.py "$cache/out-fx-link" "$HOST_PRODUCTION" > "$cache/fx-link.log" 2>&1; then
+    echo "build.sh: the link check accepted a broken internal link" >&2; exit 1
+  fi
+  grep -q "does-not-exist" "$cache/fx-link.log" \
+    || { echo "build.sh: the link check failed, but not on the broken link:" >&2; cat "$cache/fx-link.log" >&2; exit 1; }
+  echo "links: a broken internal link is caught"
 }
 
 fetch_zola
@@ -117,6 +155,7 @@ fetch_tabi
 case "${1:-build}" in
   build) build "${2:-production}" "${3:-}" ;;
   check) check ;;
+  links) "$zola" check ;;
   serve) "$zola" serve --base-url http://127.0.0.1:1111 --interface 127.0.0.1 ;;
-  *) echo "usage: $0 [build [production|preview [prefix]]|check|serve]" >&2; exit 2 ;;
+  *) echo "usage: $0 [build [production|preview [prefix]]|check|links|serve]" >&2; exit 2 ;;
 esac
