@@ -10,7 +10,7 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Runs on a GitHub-hosted runner
         run: |
@@ -35,3 +35,11 @@ jobs:
             if [ -e "$p" ]; then echo "::error::$p exists"; exit 1; fi
             echo "$p: absent (ok)"
           done
+
+      # Last, after the boundary tests: this runs the code of the pull request, with no secret in its environment.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build and checks of the site (a broken page fails here, #758)
+        run: ./build.sh check
