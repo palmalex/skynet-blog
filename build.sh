@@ -10,6 +10,7 @@
 #                              two builds of the same commit are identical, and the preview and production
 #                              builds differ only in the hostname
 #   ./build.sh links           check the external links (needs the network; advisory in CI, not part of `check`)
+#   ./build.sh html            validate the production HTML with the Nu Html Checker (needs java or docker)
 #   ./build.sh serve           build and serve on http://127.0.0.1:1111
 #
 # Everything it downloads goes under .cache/ and themes/ (git-ignored). BASE_URL overrides the base URL of `build`.
@@ -26,6 +27,17 @@ TABI_COMMIT=606f4b28aef052e8a716fe947c0166913731e339
 FEEDPARSER_VERSION=6.0.14
 LXML_VERSION=6.1.3
 SITEMAP_XSD_URL=https://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd
+
+# Size budget of every image of the output (#758).
+IMAGE_BUDGET_BYTES=204800
+# The HTML validator (Nu Html Checker, the engine of validator.w3.org/nu) from the immutable npm release; sha256
+# computed when it was pinned (2026-11-01), the npm registry also publishes sha512 Zg67G1zM...
+VNU_VERSION=26.10.12
+VNU_SHA256=3925f07364f5e5a111cef54a7baefa575b22d05c70f8ced048f0616d4579b7ab
+# Errors of the theme (tabi v5.0.0) that are known and not ours: a duplicated 'self' in its Content-Security-Policy
+# meta tag and a <span> inside the <ul class="meta"> of a post. Anything else fails; pruning or fixing the theme
+# is #826.
+VNU_KNOWN_THEME_ERRORS="Duplicate source-expression|Element .span. not allowed as child of element .ul."
 
 HOST_PRODUCTION=https://blog.palmalex.cc
 HOST_PREVIEW=https://blog-preview.palmalex.cc
@@ -59,7 +71,8 @@ fetch_tabi() {
 build_to() {
   local out=$1 url=$2
   shift 2
-  rm -rf "$out"
+  # Zola writes the images it processes into static/: start from none, so no leftover of an earlier build is published
+  rm -rf "$out" static/processed_images
   "$zola" build --base-url "$url" --output-dir "$out" "$@"
 }
 
@@ -93,6 +106,7 @@ check() {
   build production
   "$cache/venv/bin/python" check_output.py public "$cache/sitemap.xsd" content
   "$cache/venv/bin/python" -I check_links.py public "$HOST_PRODUCTION"
+  "$cache/venv/bin/python" -I check_images.py public "$IMAGE_BUDGET_BYTES"
 
   # Two builds of the same commit must be identical, byte for byte.
   build_to "$cache/out-a" "$HOST_PRODUCTION" >/dev/null
@@ -123,7 +137,7 @@ check() {
   # one; with --drafts the page and its entry in the blog list must exist, so the first half is not true only
   # because the draft was never read.
   local fx_draft=content/blog/draft-fixture fx_link=content/blog/link-fixture
-  trap 'rm -rf content/blog/draft-fixture content/blog/link-fixture' EXIT
+  trap 'rm -rf content/blog/draft-fixture content/blog/link-fixture content/blog/image-big-fixture content/blog/image-resize-fixture static/processed_images' EXIT
   rm -rf "$fx_draft" "$fx_link"
   mkdir -p "$fx_draft"
   printf '+++\ntitle = "Draft fixture"\ndate = 2026-11-01\ndraft = true\n+++\n\nA draft.\n' > "$fx_draft/index.md"
@@ -148,6 +162,79 @@ check() {
   grep -q "does-not-exist" "$cache/fx-link.log" \
     || { echo "build.sh: the link check failed, but not on the broken link:" >&2; cat "$cache/fx-link.log" >&2; exit 1; }
   echo "links: a broken internal link is caught"
+
+  # An image over the budget fails the check; the same image through the resized_image component (scaled, WebP,
+  # source not published) passes.
+  local fx_big=content/blog/image-big-fixture fx_resize=content/blog/image-resize-fixture
+  mkdir -p "$fx_big"
+  printf '+++\ntitle = "Image fixture"\ndate = 2026-11-01\n+++\n\n![big](big.png)\n' > "$fx_big/index.md"
+  "$cache/venv/bin/python" -I check_images.py fixture "$fx_big/big.png" 1600 1200
+  build_to "$cache/out-fx-big" "$HOST_PRODUCTION" >/dev/null
+  rm -rf "$fx_big"
+  if "$cache/venv/bin/python" -I check_images.py "$cache/out-fx-big" "$IMAGE_BUDGET_BYTES" > "$cache/fx-img.log" 2>&1; then
+    echo "build.sh: the image check accepted an image over the budget" >&2; exit 1
+  fi
+  grep -q "big.png" "$cache/fx-img.log" \
+    || { echo "build.sh: the image check failed, but not on the big image:" >&2; cat "$cache/fx-img.log" >&2; exit 1; }
+  mkdir -p "$fx_resize"
+  printf '+++\ntitle = "Resize fixture"\ndate = 2026-11-01\n+++\n\n{{< resized_image src="photo.src.png" alt="noise" width="600" />}}\n' > "$fx_resize/index.md"
+  "$cache/venv/bin/python" -I check_images.py fixture "$fx_resize/photo.src.png" 1600 1200
+  build_to "$cache/out-fx-resize" "$HOST_PRODUCTION" >/dev/null
+  rm -rf "$fx_resize"
+  [ -z "$(find "$cache/out-fx-resize" -name '*.src.png')" ] && [ -n "$(find "$cache/out-fx-resize/processed_images" -name '*.webp')" ] \
+    || { echo "build.sh: the resized image is missing or its source was published" >&2; exit 1; }
+  "$cache/venv/bin/python" -I check_images.py "$cache/out-fx-resize" "$IMAGE_BUDGET_BYTES" >/dev/null \
+    || { echo "build.sh: the resized image is over the budget" >&2; exit 1; }
+  echo "images: an image over the budget is caught, a scaled WebP of it passes"
+}
+
+fetch_vnu() {
+  [ -f "$cache/vnu/vnu.jar" ] && return 0
+  mkdir -p "$cache/vnu"
+  echo "downloading the HTML validator $VNU_VERSION"
+  curl -fsSL --retry 3 -o "$cache/vnu-jar-$VNU_VERSION.tgz" "https://registry.npmjs.org/vnu-jar/-/vnu-jar-$VNU_VERSION.tgz"
+  (cd "$cache" && echo "$VNU_SHA256  vnu-jar-$VNU_VERSION.tgz" | sha256sum -c -)
+  tar -xzf "$cache/vnu-jar-$VNU_VERSION.tgz" -C "$cache/vnu" --strip-components=3 package/build/dist/vnu.jar
+}
+
+# run_vnu <vnu arguments>: java if there is one (CI), else a Java container (a laptop without Java)
+run_vnu() {
+  if command -v java >/dev/null; then
+    java -jar "$cache/vnu/vnu.jar" "$@"
+  elif command -v docker >/dev/null; then
+    docker run --rm -v "$PWD:/work" -w /work eclipse-temurin:17-jre java -jar "$cache/vnu/vnu.jar" "$@"
+  else
+    echo "build.sh: html needs java or docker" >&2; exit 1
+  fi
+}
+
+# vnu_errors <dir>: the errors of the validator for <dir> that are not a known error of the theme, one per line. The
+# known ones are dropped here, on the full line, because --filterpattern only sees the first sentence of a message.
+# Fails (and prints the output) when the validator stops with an error but reports none, e.g. a crash.
+vnu_errors() {
+  local log="$cache/vnu.log" status=0
+  run_vnu --skip-non-html --errors-only "$1" > "$log" 2>&1 || status=$?
+  if [ "$status" -ne 0 ] && ! grep -q ': error: ' "$log"; then
+    echo "build.sh: the HTML validator failed without reporting an error:" >&2; cat "$log" >&2; return 1
+  fi
+  grep ': error: ' "$log" | grep -vE "$VNU_KNOWN_THEME_ERRORS" || true
+}
+
+# html: the production build must be valid HTML, apart from the known errors of the theme. A page that is not valid
+# must be reported first, otherwise a validator that reports nothing would pass.
+html() {
+  fetch_vnu
+  local bad="$cache/vnu-bad" errors
+  rm -rf "$bad"; mkdir -p "$bad"
+  printf '<!doctype html><html lang=en><head><meta charset=utf-8><title>t</title></head><body><ul><div>x</div></ul></body></html>' > "$bad/index.html"
+  [ -n "$(vnu_errors "$bad")" ] \
+    || { echo "build.sh: the HTML validator did not report a page that is not valid" >&2; exit 1; }
+  build production
+  errors=$(vnu_errors public)
+  if [ -n "$errors" ]; then
+    echo "build.sh: the HTML is not valid:" >&2; printf '%s\n' "$errors" >&2; exit 1
+  fi
+  echo "html: valid, apart from the known errors of the theme ($VNU_KNOWN_THEME_ERRORS)"
 }
 
 fetch_zola
@@ -156,6 +243,7 @@ case "${1:-build}" in
   build) build "${2:-production}" "${3:-}" ;;
   check) check ;;
   links) "$zola" check ;;
-  serve) "$zola" serve --base-url http://127.0.0.1:1111 --interface 127.0.0.1 ;;
-  *) echo "usage: $0 [build [production|preview [prefix]]|check|links|serve]" >&2; exit 2 ;;
+  html) html ;;
+  serve) "$zola" serve --drafts --base-url http://127.0.0.1:1111 --interface 127.0.0.1 ;;
+  *) echo "usage: $0 [build [production|preview [prefix]]|check|links|html|serve]" >&2; exit 2 ;;
 esac

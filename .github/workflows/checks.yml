@@ -44,6 +44,9 @@ jobs:
       - name: Build and checks of the site (a broken page fails here, #758)
         run: ./build.sh check
 
+      - name: HTML validity (Nu Html Checker; the known errors of the theme are filtered in build.sh)
+        run: ./build.sh html
+
       # Advisory: a site that is down is not a reason to block a pull request, so this reports and never fails.
       - name: External links (advisory)
         run: ./build.sh links || echo "::warning::the external link check reported problems, see the log (not blocking)"
