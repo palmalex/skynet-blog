@@ -7,6 +7,8 @@ author = "palmalex"
 theme = "tabi"
 default_language = "en"
 generate_feeds = true
+# Source images (*.src.*) are read by the resized_image component and never published (#758)
+ignored_content = ["*.src.*"]
 compile_sass = true
 minify_html = true
 build_search_index = true

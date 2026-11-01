@@ -1,0 +1,9 @@
+{#- A colocated image, scaled down to `width` pixels and converted to WebP at build time (#758).
+    The source file is named `*.src.*`: it is listed in `ignored_content` (config.toml), so it is read here
+    but never published. Usage in a post: {{< resized_image src="photo.src.png" alt="..." width="800" />}} -#}
+{% component resized_image(src: string, alt: string, width = "800", @page = {}) %}
+{%- set page_dirs = (page.relative_path | split(pat="/"))[:-1] -%}
+{%- set colocated_path = page_dirs | join(sep="/") ~ "/" -%}
+{%- set image = resize_image(path=colocated_path ~ src, width=width | int, op="fit_width", format="webp", quality=75) -%}
+<img src="{{ image.url }}" width="{{ image.width }}" height="{{ image.height }}" alt="{{ alt }}" loading="lazy">
+{% endcomponent resized_image %}
