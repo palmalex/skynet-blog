@@ -14,6 +14,7 @@ site, tailnet details, or a draft that must stay private (history is readable by
 - `static/img/favicon.png`, `config.toml` (site name "Idle Cycle", base URL of production)
 - `themes/tabi` is NOT committed: `build.sh` clones it at commit 606f4b28aef052e8a716fe947c0166913731e339 into a git-ignored folder, like the pinned Zola in `.cache/`
 - `build.sh [build [production|preview]|check|serve]`; `check` also proves that two builds of the same commit are identical and that the preview and production builds differ only in the hostname
+- `check_links.py` fails `check` on a broken internal link; `./build.sh links` checks the external ones (advisory in CI); preview builds include the drafts, production never
 - `check_output.py` reads the posts and drafts from the front matter: a new post needs no change there
 - `.github/workflows/` `checks.yml` (required status check `checks`), `pool-probe.yml` (manual boundary test)
 - The theme is used whole (about 250 files, 8 MB): pruning it is tracked as #826 in the infrastructure repository
