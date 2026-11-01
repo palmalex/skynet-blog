@@ -137,7 +137,7 @@ check() {
   # one; with --drafts the page and its entry in the blog list must exist, so the first half is not true only
   # because the draft was never read.
   local fx_draft=content/blog/draft-fixture fx_link=content/blog/link-fixture
-  trap 'rm -rf content/blog/draft-fixture content/blog/link-fixture content/blog/image-big-fixture content/blog/image-resize-fixture static/processed_images' EXIT
+  trap 'rm -rf content/blog/draft-fixture content/blog/link-fixture content/blog/image-big-fixture content/blog/image-resize-fixture content/blog/draft-checks-fixture static/processed_images' EXIT
   rm -rf "$fx_draft" "$fx_link"
   mkdir -p "$fx_draft"
   printf '+++\ntitle = "Draft fixture"\ndate = 2026-11-01\ndraft = true\n+++\n\nA draft.\n' > "$fx_draft/index.md"
@@ -150,6 +150,32 @@ check() {
     || { echo "build.sh: the draft is missing from the build with --drafts" >&2; exit 1; }
   echo "drafts: built with --drafts, absent from the production output (pages, list, feed, sitemap, search index)"
   rm -rf "$fx_draft"
+
+  # The drafts are published in the preview, so the link and image checks also run on the build that includes them:
+  # the real content first, then a draft with a broken link and an oversized image, which both checks must refuse
+  # (production does not build it, so the checks above would never see it).
+  build_to "$cache/out-drafts" "$HOST_PREVIEW" --drafts >/dev/null
+  "$cache/venv/bin/python" -I check_links.py "$cache/out-drafts" "$HOST_PREVIEW" \
+    && "$cache/venv/bin/python" -I check_images.py "$cache/out-drafts" "$IMAGE_BUDGET_BYTES" \
+    || { echo "build.sh: the build with the drafts fails the link or image check (see above)" >&2; exit 1; }
+  local fx_dc=content/blog/draft-checks-fixture
+  mkdir -p "$fx_dc"
+  printf '+++\ntitle = "Draft checks fixture"\ndate = 2026-11-01\ndraft = true\n+++\n\n[broken](/blog/does-not-exist/)\n\n![big](big.png)\n' > "$fx_dc/index.md"
+  "$cache/venv/bin/python" -I check_images.py fixture "$fx_dc/big.png" 1600 1200
+  build_to "$cache/out-fx-dc" "$HOST_PREVIEW" --drafts >/dev/null
+  build_to "$cache/out-fx-dc-prod" "$HOST_PRODUCTION" >/dev/null
+  rm -rf "$fx_dc"
+  if "$cache/venv/bin/python" -I check_links.py "$cache/out-fx-dc" "$HOST_PREVIEW" > "$cache/fx-dc-links.log" 2>&1 \
+    || ! grep -q "does-not-exist" "$cache/fx-dc-links.log"; then
+    echo "build.sh: the link check did not refuse a broken link in a draft" >&2; exit 1
+  fi
+  if "$cache/venv/bin/python" -I check_images.py "$cache/out-fx-dc" "$IMAGE_BUDGET_BYTES" > "$cache/fx-dc-images.log" 2>&1 \
+    || ! grep -q "big.png" "$cache/fx-dc-images.log"; then
+    echo "build.sh: the image check did not refuse an oversized image in a draft" >&2; exit 1
+  fi
+  "$cache/venv/bin/python" -I check_images.py "$cache/out-fx-dc-prod" "$IMAGE_BUDGET_BYTES" >/dev/null \
+    || { echo "build.sh: the draft reached the production build" >&2; exit 1; }
+  echo "drafts: the build with the drafts is checked too (broken link and oversized image refused; production does not build them)"
 
   # A broken internal link must fail the link check (the real site passed it above).
   mkdir -p "$fx_link"
