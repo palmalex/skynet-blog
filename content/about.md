@@ -1,7 +1,7 @@
 +++
 title = "About"
 template = "info-page.html"
-+++
+
 
 I'm palmalex. Idle Cycle is where I write down what I build and think about when the CPU of my day job is idle: side projects, systems, hardware and ideas that seemed worth keeping.
 
